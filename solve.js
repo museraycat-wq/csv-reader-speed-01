@@ -1,7 +1,9 @@
 // A fast reader with csv-reader 1.0.0's exact broken-row policy: run({text, header}) -> {columns, rows, errors}.
 //
-// One left-to-right pass over char codes, all state in locals of one function. A field is a slice of the text; it is
-// joined from pieces only when a stray CR, a doubled quote or a CR inside quotes forces it. The policy:
+// One left-to-right pass, all state in locals of one function. An unquoted field ends at the nearest of the next comma,
+// LF and CR, each found with indexOf and kept until the reader passes it; a quoted field is scanned by char code. A
+// field is a slice of the text; it is joined from pieces only when a stray CR, a doubled quote or a CR inside quotes
+// forces it. The policy:
 //   - a U+FEFF at the very start is dropped; a record ends at LF or CRLF; an empty line is no record;
 //   - outside quotes a CR not followed by LF is dropped (stray_cr);
 //   - a field opening with a quote runs to the next quote that is not doubled ("" is one quote, CRLF and lone CR are
@@ -22,6 +24,10 @@ export function run(input) {
   let pos = n > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
   let line = 1;
   let wantHeader = header;
+  // The next comma, LF and CR at or after the reader's position (n: none left); -1: not looked up yet.
+  let nc = -1;
+  let nl = -1;
+  let nr = -1;
 
   for (;;) {
     // Lines with no characters are no records.
@@ -111,6 +117,7 @@ export function run(input) {
         } else {
           pos = open + 1;
           line = openLine;
+          nc = nl = nr = -1; // read again from before them
           errors.push({ code: 'unterminated_quote', line: recLine, row: recRow });
           prefix = '"';
         }
@@ -119,26 +126,33 @@ export function run(input) {
       // Unquoted characters onto `prefix`, up to the next comma or line break.
       let start = pos;
       let c = 0;
-      while (pos < n) {
-        c = text.charCodeAt(pos);
-        if (c > 44) {
-          pos++;
-          continue;
+      for (;;) {
+        if (nc < pos) {
+          nc = text.indexOf(',', pos);
+          if (nc < 0) nc = n;
         }
-        if (c === 44 || c === 10) break;
-        if (c === 13) {
-          if (pos + 1 < n && text.charCodeAt(pos + 1) === 10) break;
-          // A stray CR: dropped.
-          errors.push({ code: 'stray_cr', line: recLine, row: recRow });
-          if (pos > start) {
-            prefix += text.slice(start, pos);
-            junk = junk === true ? 2 : junk;
-          }
-          pos++;
-          start = pos;
-          continue;
+        if (nl < pos) {
+          nl = text.indexOf('\n', pos);
+          if (nl < 0) nl = n;
+        }
+        if (nr < pos) {
+          nr = text.indexOf('\r', pos);
+          if (nr < 0) nr = n;
+        }
+        let e = nc < nl ? nc : nl;
+        if (nr < e) e = nr;
+        pos = e;
+        if (e >= n) break;
+        c = text.charCodeAt(e);
+        if (c !== 13 || (e + 1 < n && text.charCodeAt(e + 1) === 10)) break;
+        // A stray CR: dropped.
+        errors.push({ code: 'stray_cr', line: recLine, row: recRow });
+        if (pos > start) {
+          prefix += text.slice(start, pos);
+          junk = junk === true ? 2 : junk;
         }
         pos++;
+        start = pos;
       }
       if (junk !== false && (junk === 2 || pos > start)) {
         errors.push({ code: 'quote_junk', line: recLine, row: recRow });
